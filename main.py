@@ -225,7 +225,7 @@ async def allbalances(interaction: discord.Interaction):
     view = BalancePaginator(interaction, data)
     await interaction.response.send_message(embed=view.get_embed(), view=view)
 
-# Mass Commands (add, remove, clear)
+# Mass Commands
 @bot.tree.command(name="massadd", description="Add silver to ALL mentioned users (MR only)")
 @app_commands.describe(message_link="Discord message link", amount="Amount of silver")
 async def massadd(interaction: discord.Interaction, message_link: str, amount: int):
@@ -326,6 +326,19 @@ async def leaderboard(interaction: discord.Interaction):
     desc = "\n".join([f"`{i:2d}.` **{name}** — **{bal:,} silver**" for i, (name, bal) in enumerate(rows, 1)])
     embed = discord.Embed(title="🏆 Richest Players", description=desc, color=0xFFD700)
     await interaction.response.send_message(embed=embed)
+
+# New Sync Command
+@bot.tree.command(name="sync", description="Force update all slash commands (MR only)")
+async def sync(interaction: discord.Interaction):
+    if not has_economy_permission(interaction):
+        await interaction.response.send_message("❌ Only MR role can use this command.", ephemeral=True)
+        return
+    await interaction.response.defer()
+    try:
+        synced = await bot.tree.sync()
+        await interaction.followup.send(f"✅ Successfully synced **{len(synced)}** commands!")
+    except Exception as e:
+        await interaction.followup.send(f"❌ Sync failed: {str(e)}")
 
 # Backup Commands
 @bot.tree.command(name="listbackups", description="List all database backups (MR only)")
