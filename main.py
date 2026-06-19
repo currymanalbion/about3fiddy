@@ -1,5 +1,5 @@
 import discord
-from discord import app_commands
+from discord import app_commands, ui
 from discord.ext import commands
 import sqlite3
 import os
@@ -89,6 +89,14 @@ def update_balance(user_id, username, amount):
     conn.commit()
     conn.close()
 
+def get_all_balances():
+    conn = sqlite3.connect('currency.db')
+    c = conn.cursor()
+    c.execute("SELECT username, balance FROM balances WHERE balance > 0 ORDER BY balance DESC")
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
 def has_economy_permission(interaction: discord.Interaction) -> bool:
     if not interaction.guild:
         return False
@@ -101,14 +109,51 @@ async def on_ready():
     print(f'✅ {bot.user} is online!')
     init_db()
     backup_database()
-    
     try:
         synced = await bot.tree.sync()
         print(f"Synced {len(synced)} command(s)")
     except Exception as e:
         print(e)
-
     bot.loop.create_task(periodic_backup())
+
+# ==================== PAGINATED ALL BALANCES ====================
+class BalancePaginator(ui.View):
+    def __init__(self, interaction: discord.Interaction, data, per_page=10):
+        super().__init__(timeout=180)
+        self.interaction = interaction
+        self.data = data
+        self.per_page = per_page
+        self.current_page = 0
+
+    def get_embed(self):
+        start = self.current_page * self.per_page
+        end = start + self.per_page
+        page_data = self.data[start:end]
+
+        desc = ""
+        for i, (name, bal) in enumerate(page_data, start + 1):
+            desc += f"`{i:2d}.` **{name}** — **{bal:,} silver**\n"
+
+        total_pages = (len(self.data) + self.per_page - 1) // self.per_page
+        embed = discord.Embed(
+            title="📋 All Player Balances",
+            description=desc or "No balances recorded yet.",
+            color=0x00AAFF
+        )
+        embed.set_footer(text=f"Page {self.current_page + 1}/{total_pages} • Total users with silver: {len(self.data)}")
+        return embed
+
+    @ui.button(label="◀️ Previous", style=discord.ButtonStyle.gray)
+    async def previous(self, interaction: discord.Interaction, button: ui.Button):
+        if self.current_page > 0:
+            self.current_page -= 1
+            await interaction.response.edit_message(embed=self.get_embed(), view=self)
+
+    @ui.button(label="Next ▶️", style=discord.ButtonStyle.gray)
+    async def next(self, interaction: discord.Interaction, button: ui.Button):
+        if (self.current_page + 1) * self.per_page < len(self.data):
+            self.current_page += 1
+            await interaction.response.edit_message(embed=self.get_embed(), view=self)
 
 # ==================== COMMANDS ====================
 
@@ -118,9 +163,9 @@ async def balance(interaction: discord.Interaction, user: discord.Member = None)
     target = user or interaction.user
     bal = get_balance(target.id)
     if target == interaction.user:
-        await interaction.response.send_message(f"💰 **{target.name}**, your balance is **{bal} silver**.")
+        await interaction.response.send_message(f"💰 **{target.name}**, your balance is **{bal:,} silver**.")
     else:
-        await interaction.response.send_message(f"💰 **{target.name}** has **{bal} silver**.")
+        await interaction.response.send_message(f"💰 **{target.name}** has **{bal:,} silver**.")
 
 @bot.tree.command(name="give", description="Give silver to another user")
 @app_commands.describe(user="The user to give silver to", amount="Amount of silver")
@@ -132,10 +177,9 @@ async def give(interaction: discord.Interaction, user: discord.Member, amount: i
     if sender_bal < amount:
         await interaction.response.send_message("❌ You don't have enough silver!", ephemeral=True)
         return
-
     update_balance(interaction.user.id, interaction.user.name, -amount)
     update_balance(user.id, user.name, amount)
-    await interaction.response.send_message(f"✅ **{interaction.user.name}** gave **{amount} silver** to **{user.name}**!")
+    await interaction.response.send_message(f"✅ **{interaction.user.name}** gave **{amount:,} silver** to **{user.name}**!")
 
 @bot.tree.command(name="add", description="Add silver to a user (MR only)")
 @app_commands.describe(user="Target user", amount="Amount of silver to add")
@@ -147,7 +191,7 @@ async def add(interaction: discord.Interaction, user: discord.Member, amount: in
         await interaction.response.send_message("❌ Amount must be positive!", ephemeral=True)
         return
     update_balance(user.id, user.name, amount)
-    await interaction.response.send_message(f"✅ Added **{amount} silver** to **{user.name}**.")
+    await interaction.response.send_message(f"✅ Added **{amount:,} silver** to **{user.name}**.")
 
 @bot.tree.command(name="remove", description="Remove silver from a user (MR only)")
 @app_commands.describe(user="Target user", amount="Amount of silver to remove")
@@ -161,7 +205,7 @@ async def remove(interaction: discord.Interaction, user: discord.Member, amount:
     current = get_balance(user.id)
     to_remove = min(amount, current)
     update_balance(user.id, user.name, -to_remove)
-    await interaction.response.send_message(f"✅ Removed **{to_remove} silver** from **{user.name}**.")
+    await interaction.response.send_message(f"✅ Removed **{to_remove:,} silver** from **{user.name}**.")
 
 @bot.tree.command(name="clearbalance", description="Set a player's balance to 0 (MR only)")
 @app_commands.describe(user="The user whose balance to clear")
@@ -172,7 +216,16 @@ async def clearbalance(interaction: discord.Interaction, user: discord.Member):
     update_balance(user.id, user.name, -get_balance(user.id))
     await interaction.response.send_message(f"✅ **{user.name}**'s balance has been **cleared to 0**.")
 
-# ====================== MASS COMMANDS ======================
+@bot.tree.command(name="allbalances", description="Show all users with balances (paginated)")
+async def allbalances(interaction: discord.Interaction):
+    data = get_all_balances()
+    if not data:
+        await interaction.response.send_message("No one has any silver yet!")
+        return
+    view = BalancePaginator(interaction, data)
+    await interaction.response.send_message(embed=view.get_embed(), view=view)
+
+# Mass Commands (add, remove, clear)
 @bot.tree.command(name="massadd", description="Add silver to ALL mentioned users (MR only)")
 @app_commands.describe(message_link="Discord message link", amount="Amount of silver")
 async def massadd(interaction: discord.Interaction, message_link: str, amount: int):
@@ -182,7 +235,6 @@ async def massadd(interaction: discord.Interaction, message_link: str, amount: i
     if amount <= 0:
         await interaction.response.send_message("❌ Amount must be positive!", ephemeral=True)
         return
-    # ... (same logic as before)
     await interaction.response.defer()
     match = re.search(r'/channels/(\d+)/(\d+)/(\d+)', message_link)
     if not match:
@@ -197,7 +249,7 @@ async def massadd(interaction: discord.Interaction, message_link: str, amount: i
             return
         for user in message.mentions:
             update_balance(user.id, user.name, amount)
-        await interaction.followup.send(f"✅ **{amount} silver** added to **{len(message.mentions)}** users!")
+        await interaction.followup.send(f"✅ **{amount:,} silver** added to **{len(message.mentions)}** users!")
     except Exception as e:
         await interaction.followup.send(f"❌ Error: {str(e)}")
 
@@ -229,7 +281,7 @@ async def massremove(interaction: discord.Interaction, message_link: str, amount
             if to_remove > 0:
                 update_balance(user.id, user.name, -to_remove)
                 removed_count += 1
-        await interaction.followup.send(f"✅ **{amount} silver** removed from **{removed_count}** users!")
+        await interaction.followup.send(f"✅ **{amount:,} silver** removed from **{removed_count}** users!")
     except Exception as e:
         await interaction.followup.send(f"❌ Error: {str(e)}")
 
@@ -271,7 +323,7 @@ async def leaderboard(interaction: discord.Interaction):
     if not rows:
         await interaction.response.send_message("No data yet!")
         return
-    desc = "\n".join([f"`{i:2d}.` **{name}** — **{bal} silver**" for i, (name, bal) in enumerate(rows, 1)])
+    desc = "\n".join([f"`{i:2d}.` **{name}** — **{bal:,} silver**" for i, (name, bal) in enumerate(rows, 1)])
     embed = discord.Embed(title="🏆 Richest Players", description=desc, color=0xFFD700)
     await interaction.response.send_message(embed=embed)
 
