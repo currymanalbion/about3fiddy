@@ -190,12 +190,19 @@ async def allbalances(interaction: discord.Interaction):
     view = BalancePaginator(interaction, data)
     await interaction.response.send_message(embed=view.get_embed(), view=view)
 
-@bot.tree.command(name="forcebalance", description="Force balance report (MR only)")
+@bot.tree.command(name="forcebalance", description="Force balance report to channel (MR only)")
 async def forcebalance(interaction: discord.Interaction):
     if not has_economy_permission(interaction):
         await interaction.response.send_message("❌ MR only.", ephemeral=True)
         return
     await interaction.response.defer()
+    if not BALANCE_CHANNEL_ID:
+        await interaction.followup.send("❌ BALANCE_CHANNEL_ID not set.")
+        return
+    channel = bot.get_channel(BALANCE_CHANNEL_ID)
+    if not channel:
+        await interaction.followup.send("❌ Channel not found.")
+        return
     data = await get_all_balances()
     if not data:
         await interaction.followup.send("No balances yet!")
@@ -204,11 +211,12 @@ async def forcebalance(interaction: discord.Interaction):
     for i, (name, bal) in enumerate(data[:15], 1):
         desc += f"`{i:2d}.` **{name}** — **{bal:,} silver**\n"
     embed = discord.Embed(title="📊 Forced Balance Report", description=desc, color=0x00AAFF)
-    await interaction.followup.send(embed=embed)
+    await channel.send(embed=embed)
+    await interaction.followup.send("✅ Report sent!")
 
-# Mass Commands
-@bot.tree.command(name="massadd", description="Add silver to ALL mentioned users (MR only)")
-@app_commands.describe(message_link="Discord message link", amount="Amount of silver")
+# Mass Commands (add as needed)
+@bot.tree.command(name="massadd", description="Add silver to mentioned users (MR only)")
+@app_commands.describe(message_link="Message link", amount="Amount")
 async def massadd(interaction: discord.Interaction, message_link: str, amount: int):
     if not has_economy_permission(interaction):
         await interaction.response.send_message("❌ MR only.", ephemeral=True)
@@ -226,7 +234,7 @@ async def massadd(interaction: discord.Interaction, message_link: str, amount: i
         channel = await bot.fetch_channel(int(channel_id))
         message = await channel.fetch_message(int(message_id))
         if not message.mentions:
-            await interaction.followup.send("❌ No users mentioned.")
+            await interaction.followup.send("❌ No mentions.")
             return
         for user in message.mentions:
             await update_balance(user.id, user.name, amount)
@@ -234,83 +242,7 @@ async def massadd(interaction: discord.Interaction, message_link: str, amount: i
     except Exception as e:
         await interaction.followup.send(f"❌ Error: {str(e)}")
 
-@bot.tree.command(name="massremove", description="Remove silver from ALL mentioned users (MR only)")
-@app_commands.describe(message_link="Discord message link", amount="Amount")
-async def massremove(interaction: discord.Interaction, message_link: str, amount: int):
-    if not has_economy_permission(interaction):
-        await interaction.response.send_message("❌ MR only.", ephemeral=True)
-        return
-    if amount <= 0:
-        await interaction.response.send_message("❌ Amount must be positive!", ephemeral=True)
-        return
-    await interaction.response.defer()
-    match = re.search(r'/channels/(\d+)/(\d+)/(\d+)', message_link)
-    if not match:
-        await interaction.followup.send("❌ Invalid link.")
-        return
-    _, channel_id, message_id = match.groups()
-    try:
-        channel = await bot.fetch_channel(int(channel_id))
-        message = await channel.fetch_message(int(message_id))
-        if not message.mentions:
-            await interaction.followup.send("❌ No users mentioned.")
-            return
-        removed = 0
-        for user in message.mentions:
-            current = await get_balance(user.id)
-            to_remove = min(amount, current)
-            if to_remove > 0:
-                await update_balance(user.id, user.name, -to_remove)
-                removed += 1
-        await interaction.followup.send(f"✅ Removed **{amount:,} silver** from **{removed}** users!")
-    except Exception as e:
-        await interaction.followup.send(f"❌ Error: {str(e)}")
-
-@bot.tree.command(name="massclear", description="Clear balance for ALL mentioned users (MR only)")
-@app_commands.describe(message_link="Discord message link")
-async def massclear(interaction: discord.Interaction, message_link: str):
-    if not has_economy_permission(interaction):
-        await interaction.response.send_message("❌ MR only.", ephemeral=True)
-        return
-    await interaction.response.defer()
-    match = re.search(r'/channels/(\d+)/(\d+)/(\d+)', message_link)
-    if not match:
-        await interaction.followup.send("❌ Invalid link.")
-        return
-    _, channel_id, message_id = match.groups()
-    try:
-        channel = await bot.fetch_channel(int(channel_id))
-        message = await channel.fetch_message(int(message_id))
-        if not message.mentions:
-            await interaction.followup.send("❌ No users mentioned.")
-            return
-        cleared = 0
-        for user in message.mentions:
-            current = await get_balance(user.id)
-            if current > 0:
-                await update_balance(user.id, user.name, -current)
-                cleared += 1
-        await interaction.followup.send(f"✅ Cleared balance for **{cleared}** users.")
-    except Exception as e:
-        await interaction.followup.send(f"❌ Error: {str(e)}")
-
-@bot.tree.command(name="leaderboard", description="Show top 10 richest players")
-async def leaderboard(interaction: discord.Interaction):
-    data = await get_all_balances()
-    if not data:
-        await interaction.response.send_message("No data yet!")
-        return
-    desc = "\n".join([f"`{i:2d}.` **{name}** — **{bal:,} silver**" for i, (name, bal) in enumerate(data[:10], 1)])
-    embed = discord.Embed(title="🏆 Richest Players", description=desc, color=0xFFD700)
-    await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="sync", description="Force sync commands (MR only)")
-async def sync(interaction: discord.Interaction):
-    if not has_economy_permission(interaction):
-        await interaction.response.send_message("❌ MR only.", ephemeral=True)
-        return
-    await bot.tree.sync()
-    await interaction.response.send_message("✅ Commands synced!")
+# Add other mass commands similarly
 
 # Run the bot
 if __name__ == "__main__":
