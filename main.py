@@ -45,23 +45,13 @@ async def on_ready():
         print(e)
 
     if BALANCE_CHANNEL_ID:
-        bot.loop.create_task(hourly_balance_report())
+        bot.loop.create_task(balance_report_task())
 
-async def hourly_balance_report():
+async def balance_report_task():
     await bot.wait_until_ready()
     while True:
-        if BALANCE_CHANNEL_ID:
-            channel = bot.get_channel(BALANCE_CHANNEL_ID)
-            if channel:
-                data = await get_all_balances()
-                if data:
-                    desc = ""
-                    for i, (name, bal) in enumerate(data[:15], 1):
-                        desc += f"`{i:2d}.` **{name}** — **{bal:,} silver**\n"
-                    embed = discord.Embed(title="📊 Hourly Balance Report", description=desc, color=0x00AAFF)
-                    embed.set_footer(text=f"Total users: {len(data)} | {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-                    await channel.send(embed=embed)
-        await asyncio.sleep(3600)
+        await send_balance_report()
+        await asyncio.sleep(6 * 3600)  # Every 6 hours
 
 # ==================== HELPERS ====================
 async def get_balance(user_id):
@@ -82,13 +72,26 @@ async def get_all_balances():
     async with db_pool.acquire() as conn:
         return await conn.fetch("SELECT username, balance FROM balances WHERE balance > 0 ORDER BY balance DESC")
 
+async def send_balance_report():
+    """Send full paginated balance report to the balance channel"""
+    if not BALANCE_CHANNEL_ID:
+        return
+    channel = bot.get_channel(BALANCE_CHANNEL_ID)
+    if not channel:
+        return
+    data = await get_all_balances()
+    if not data:
+        return
+    view = BalancePaginator(None, data)
+    await channel.send(embed=view.get_embed(), view=view)
+
 def has_economy_permission(interaction: discord.Interaction) -> bool:
     user_roles = [role.name for role in interaction.user.roles]
     return any(role_name in user_roles for role_name in ECONOMY_MANAGER_ROLES)
 
 # ==================== PAGINATOR ====================
 class BalancePaginator(ui.View):
-    def __init__(self, interaction: discord.Interaction, data, per_page=10):
+    def __init__(self, interaction, data, per_page=10):
         super().__init__(timeout=300)
         self.interaction = interaction
         self.data = data
@@ -145,6 +148,7 @@ async def give(interaction: discord.Interaction, user: discord.Member, amount: i
     await update_balance(interaction.user.id, interaction.user.name, -amount)
     await update_balance(user.id, user.name, amount)
     await interaction.response.send_message(f"✅ Gave **{amount:,} silver** to **{user.name}**!")
+    await send_balance_report()  # Auto report
 
 @bot.tree.command(name="add", description="Add silver (MR only)")
 @app_commands.describe(user="Target", amount="Amount")
@@ -157,6 +161,7 @@ async def add(interaction: discord.Interaction, user: discord.Member, amount: in
         return
     await update_balance(user.id, user.name, amount)
     await interaction.response.send_message(f"✅ Added **{amount:,} silver** to **{user.name}**.")
+    await send_balance_report()  # Auto report
 
 @bot.tree.command(name="remove", description="Remove silver (MR only)")
 @app_commands.describe(user="Target", amount="Amount")
@@ -171,6 +176,7 @@ async def remove(interaction: discord.Interaction, user: discord.Member, amount:
     to_remove = min(amount, current)
     await update_balance(user.id, user.name, -to_remove)
     await interaction.response.send_message(f"✅ Removed **{to_remove:,} silver** from **{user.name}**.")
+    await send_balance_report()  # Auto report
 
 @bot.tree.command(name="clearbalance", description="Clear balance to 0 (MR only)")
 @app_commands.describe(user="Target")
@@ -180,6 +186,7 @@ async def clearbalance(interaction: discord.Interaction, user: discord.Member):
         return
     await update_balance(user.id, user.name, -await get_balance(user.id))
     await interaction.response.send_message(f"✅ Cleared **{user.name}**'s balance to 0.")
+    await send_balance_report()  # Auto report
 
 @bot.tree.command(name="allbalances", description="Show all balances (paginated)")
 async def allbalances(interaction: discord.Interaction):
@@ -190,31 +197,15 @@ async def allbalances(interaction: discord.Interaction):
     view = BalancePaginator(interaction, data)
     await interaction.response.send_message(embed=view.get_embed(), view=view)
 
-@bot.tree.command(name="forcebalance", description="Force balance report (MR only)")
+@bot.tree.command(name="forcebalance", description="Force balance report to channel (MR only)")
 async def forcebalance(interaction: discord.Interaction):
     if not has_economy_permission(interaction):
         await interaction.response.send_message("❌ MR only.", ephemeral=True)
         return
     await interaction.response.defer()
-    if not BALANCE_CHANNEL_ID:
-        await interaction.followup.send("❌ BALANCE_CHANNEL_ID not set.")
-        return
-    channel = bot.get_channel(BALANCE_CHANNEL_ID)
-    if not channel:
-        await interaction.followup.send("❌ Channel not found.")
-        return
-    data = await get_all_balances()
-    if not data:
-        await interaction.followup.send("No balances yet!")
-        return
-    desc = ""
-    for i, (name, bal) in enumerate(data[:15], 1):
-        desc += f"`{i:2d}.` **{name}** — **{bal:,} silver**\n"
-    embed = discord.Embed(title="📊 Forced Balance Report", description=desc, color=0x00AAFF)
-    await channel.send(embed=embed)
-    await interaction.followup.send("✅ Report sent!")
+    await send_balance_report()
+    await interaction.followup.send("✅ Report sent to the balance channel!")
 
-# Mass Commands
 @bot.tree.command(name="massadd", description="Add silver to ALL mentioned users (MR only)")
 @app_commands.describe(message_link="Discord message link", amount="Amount of silver")
 async def massadd(interaction: discord.Interaction, message_link: str, amount: int):
@@ -239,6 +230,7 @@ async def massadd(interaction: discord.Interaction, message_link: str, amount: i
         for user in message.mentions:
             await update_balance(user.id, user.name, amount)
         await interaction.followup.send(f"✅ Added **{amount:,} silver** to **{len(message.mentions)}** users!")
+        await send_balance_report()  # Auto report
     except Exception as e:
         await interaction.followup.send(f"❌ Error: {str(e)}")
 
@@ -271,6 +263,7 @@ async def massremove(interaction: discord.Interaction, message_link: str, amount
                 await update_balance(user.id, user.name, -to_remove)
                 removed += 1
         await interaction.followup.send(f"✅ Removed **{amount:,} silver** from **{removed}** users!")
+        await send_balance_report()  # Auto report
     except Exception as e:
         await interaction.followup.send(f"❌ Error: {str(e)}")
 
@@ -299,6 +292,7 @@ async def massclear(interaction: discord.Interaction, message_link: str):
                 await update_balance(user.id, user.name, -current)
                 cleared += 1
         await interaction.followup.send(f"✅ Cleared balance for **{cleared}** users.")
+        await send_balance_report()  # Auto report
     except Exception as e:
         await interaction.followup.send(f"❌ Error: {str(e)}")
 
